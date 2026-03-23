@@ -69,6 +69,12 @@ describe('Payment API', () => {
     expect(res.body.feeValidation).toHaveProperty('status', 'valid');
   });
 
+  test('POST /api/payments/verify records payment with confirmed status', async () => {
+    const { recordPayment } = require('../backend/src/services/stellarService');
+    await request(app).post('/api/payments/verify').send({ txHash: 'abc123' });
+    expect(recordPayment).toHaveBeenCalledWith(expect.objectContaining({ status: 'confirmed' }));
+  });
+
   test('POST /api/payments/verify returns 409 for duplicate transaction', async () => {
     const Payment = require('../backend/src/models/paymentModel');
     Payment.findOne.mockResolvedValueOnce({ txHash: 'abc123' });

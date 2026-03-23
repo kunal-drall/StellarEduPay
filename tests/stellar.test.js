@@ -147,7 +147,7 @@ describe('validatePaymentAgainstFee', () => {
 describe('recordPayment', () => {
   const Payment = require('../backend/src/models/paymentModel');
 
-  const paymentData = { studentId: 'STU001', txHash: 'abc123', amount: 200, feeAmount: 200, feeValidationStatus: 'valid', memo: 'STU001', confirmedAt: new Date() };
+  const paymentData = { studentId: 'STU001', txHash: 'abc123', amount: 200, feeAmount: 200, feeValidationStatus: 'valid', status: 'confirmed', memo: 'STU001', confirmedAt: new Date() };
 
   beforeEach(() => jest.clearAllMocks());
 
@@ -155,6 +155,12 @@ describe('recordPayment', () => {
     Payment.findOne.mockResolvedValueOnce(null);
     await expect(recordPayment(paymentData)).resolves.toBeDefined();
     expect(Payment.create).toHaveBeenCalledWith(paymentData);
+  });
+
+  test('saves payment with confirmed status', async () => {
+    Payment.findOne.mockResolvedValueOnce(null);
+    await recordPayment(paymentData);
+    expect(Payment.create).toHaveBeenCalledWith(expect.objectContaining({ status: 'confirmed' }));
   });
 
   test('throws DUPLICATE_TX when txHash already exists', async () => {

@@ -36,15 +36,26 @@ async function verifyPayment(req, res) {
       });
     }
 
-    const result = await verifyTransaction(txHash);
+    let result;
+    try {
+      result = await verifyTransaction(txHash);
+    } catch (err) {
+      // Blockchain-level failures — record as failed then surface the error
+      const failCodes = ['TX_FAILED', 'MISSING_MEMO', 'INVALID_DESTINATION', 'UNSUPPORTED_ASSET'];
+      if (failCodes.includes(err.code)) {
+        await Payment.create({ studentId: 'unknown', txHash, amount: 0, status: 'failed' }).catch(() => {});
+      }
+      throw err;
+    }
 
-    // Persist the verified payment
+    // Persist the verified payment as confirmed
     await recordPayment({
       studentId: result.memo,
       txHash: result.hash,
       amount: result.amount,
       feeAmount: result.feeAmount,
       feeValidationStatus: result.feeValidation.status,
+      status: 'confirmed',
       memo: result.memo,
       confirmedAt: new Date(result.date),
     });
