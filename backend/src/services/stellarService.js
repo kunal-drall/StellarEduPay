@@ -52,6 +52,11 @@ async function syncPayments() {
     if (!student) continue;
 
     const paymentAmount = parseFloat(payOp.amount);
+    const senderAddress = payOp.from || null;
+    const txDate = new Date(tx.created_at);
+
+    // Detect memo collision before recording
+    const collision = await detectMemoCollision(memo, senderAddress, paymentAmount, student.feeAmount, txDate);
 
     // Aggregate all previous payments for this student
     const previousPayments = await Payment.aggregate([
@@ -84,18 +89,23 @@ async function syncPayments() {
       feeValidationStatus: cumulativeStatus,
       excessAmount,
       memo,
-      confirmedAt: new Date(tx.created_at),
+      senderAddress,
+      isSuspicious: collision.suspicious,
+      suspicionReason: collision.reason,
+      confirmedAt: txDate,
     });
 
-    // Update student's running totals
-    await Student.findOneAndUpdate(
-      { studentId: memo },
-      {
-        totalPaid: cumulativeTotal,
-        remainingBalance: remaining < 0 ? 0 : remaining,
-        feePaid: cumulativeTotal >= student.feeAmount,
-      }
-    );
+    // Only update student balance if payment is not suspicious
+    if (!collision.suspicious) {
+      await Student.findOneAndUpdate(
+        { studentId: memo },
+        {
+          totalPaid: cumulativeTotal,
+          remainingBalance: remaining < 0 ? 0 : remaining,
+          feePaid: cumulativeTotal >= student.feeAmount,
+        }
+      );
+    }
   }
 }
 
@@ -126,7 +136,44 @@ async function verifyTransaction(txHash) {
 }
 
 /**
- * Validate a payment amount against the expected fee.
+ * Detect memo collision: same memo used by a different sender within a time window,
+ * or payment amount doesn't match the student's expected fee at all.
+ * @param {string} memo - the student ID used as memo
+ * @param {string} senderAddress - the Stellar address that sent this payment
+ * @param {number} paymentAmount - amount sent in this transaction
+ * @param {number} expectedFee - the student's required fee
+ * @param {Date} txDate - timestamp of this transaction
+ * @returns {{ suspicious: boolean, reason: string|null }}
+ */
+async function detectMemoCollision(memo, senderAddress, paymentAmount, expectedFee, txDate) {
+  const COLLISION_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+  const windowStart = new Date(txDate.getTime() - COLLISION_WINDOW_MS);
+
+  // Find recent payments for the same memo from a different sender
+  const recentFromOtherSender = await Payment.findOne({
+    studentId: memo,
+    senderAddress: { $ne: senderAddress, $ne: null },
+    confirmedAt: { $gte: windowStart },
+  });
+
+  if (recentFromOtherSender) {
+    return {
+      suspicious: true,
+      reason: `Memo "${memo}" was used by a different sender (${recentFromOtherSender.senderAddress}) within the last 24 hours`,
+    };
+  }
+
+  // Flag if amount is wildly off — not a round installment and not matching fee at all
+  // (secondary validation: amount should be > 0 and not exceed fee by more than 2x)
+  if (paymentAmount <= 0 || paymentAmount > expectedFee * 2) {
+    return {
+      suspicious: true,
+      reason: `Unusual payment amount ${paymentAmount} for expected fee ${expectedFee}`,
+    };
+  }
+
+  return { suspicious: false, reason: null };
+}
  * @param {number} paymentAmount — the amount actually paid
  * @param {number} expectedFee — the fee the student owes
  * @returns {{ status: string, message: string }}
@@ -154,4 +201,4 @@ function validatePaymentAgainstFee(paymentAmount, expectedFee) {
   };
 }
 
-module.exports = { syncPayments, verifyTransaction, validatePaymentAgainstFee };
+module.exports = { syncPayments, verifyTransaction, validatePaymentAgainstFee, detectMemoCollision };
