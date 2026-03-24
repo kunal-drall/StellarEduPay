@@ -21,6 +21,7 @@ const paymentSchema = new mongoose.Schema({
   ledger: { type: Number, default: null },
   confirmationStatus: { type: String, enum: ['pending_confirmation', 'confirmed'], default: 'pending_confirmation' },
   confirmedAt: { type: Date, default: Date.now },
+  referenceCode: { type: String, unique: true, sparse: true, index: true },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Payment', paymentSchema);

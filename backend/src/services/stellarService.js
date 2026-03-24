@@ -2,6 +2,7 @@ const { server, SCHOOL_WALLET, isAcceptedAsset, CONFIRMATION_THRESHOLD } = requi
 const Payment = require('../models/paymentModel');
 const Student = require('../models/studentModel');
 const PaymentIntent = require('../models/paymentIntentModel');
+const { generateReferenceCode } = require('../utils/generateReferenceCode');
 
 /**
  * Detect asset information from a Stellar payment operation.
@@ -147,6 +148,7 @@ async function syncPayments() {
       ledger: txLedger,
       confirmationStatus,
       confirmedAt: txDate,
+      referenceCode: await generateReferenceCode(),
     });
 
     // Only update student balance if payment is confirmed and not suspicious
@@ -190,10 +192,12 @@ async function recordPayment(data) {
     err.code = 'DUPLICATE_TX';
     throw err;
   }
+  if (!data.referenceCode) {
+    data = { ...data, referenceCode: await generateReferenceCode() };
+  }
   try {
     return await Payment.create(data);
   } catch (e) {
-    // Catch race-condition duplicate key errors from MongoDB
     if (e.code === 11000) {
       const err = new Error(`Transaction ${data.txHash} has already been processed`);
       err.code = 'DUPLICATE_TX';
