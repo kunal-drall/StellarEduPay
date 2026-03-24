@@ -1,18 +1,31 @@
 const StellarSdk = require('@stellar/stellar-sdk');
 
+// Validate required environment variables at startup
+const REQUIRED_ENV = ['SCHOOL_WALLET_ADDRESS', 'MONGO_URI'];
+const missing = REQUIRED_ENV.filter(k => !process.env[k]);
+if (missing.length) {
+  throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+}
+
 const isTestnet = process.env.STELLAR_NETWORK !== 'mainnet';
 
-const server = new StellarSdk.Horizon.Server(
-  isTestnet
-    ? 'https://horizon-testnet.stellar.org'
-    : 'https://horizon.stellar.org'
+const HORIZON_URL = process.env.HORIZON_URL || (
+  isTestnet ? 'https://horizon-testnet.stellar.org' : 'https://horizon.stellar.org'
 );
+
+const server = new StellarSdk.Horizon.Server(HORIZON_URL);
 
 const networkPassphrase = isTestnet
   ? StellarSdk.Networks.TESTNET
   : StellarSdk.Networks.PUBLIC;
 
 const SCHOOL_WALLET = process.env.SCHOOL_WALLET_ADDRESS;
+
+const USDC_ISSUER = process.env.USDC_ISSUER || (
+  isTestnet
+    ? 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5'
+    : 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+);
 
 // Accepted assets configuration — add new assets here to support them
 const ACCEPTED_ASSETS = {
@@ -26,9 +39,7 @@ const ACCEPTED_ASSETS = {
   USDC: {
     code: 'USDC',
     type: 'credit_alphanum4',
-    issuer: isTestnet
-      ? 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5'
-      : 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+    issuer: USDC_ISSUER,
     displayName: 'USD Coin',
     decimals: 7,
   },
