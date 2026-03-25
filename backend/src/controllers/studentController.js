@@ -8,6 +8,11 @@ async function registerStudent(req, res, next) {
   try {
     const { schoolId } = req; // injected by resolveSchool middleware
     const { studentId, name, class: className, feeAmount } = req.body;
+    let { studentId, name, class: className, feeAmount } = req.body;
+    if (!studentId) {
+      const { generateStudentId } = require('../utils/generateStudentId');
+      studentId = await generateStudentId();
+    }
 
     let assignedFee = feeAmount;
     if (assignedFee == null && className) {

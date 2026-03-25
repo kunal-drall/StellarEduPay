@@ -4,6 +4,7 @@ const { server, isAcceptedAsset, CONFIRMATION_THRESHOLD } = require('../config/s
 const Payment = require('../models/paymentModel');
 const Student = require('../models/studentModel');
 const PaymentIntent = require('../models/paymentIntentModel');
+const { generateReferenceCode } = require('../utils/generateReferenceCode');
 
 /**
  * Detect asset information from a Stellar payment operation.
@@ -43,6 +44,98 @@ async function extractValidPayment(tx, walletAddress) {
 }
 
 /**
+ * Fetch recent transactions to the school wallet and record new payments.
+ */
+async function syncPayments() {
+  const transactions = await server
+    .transactions()
+    .forAccount(SCHOOL_WALLET)
+    .order('desc')
+    .limit(20)
+    .call();
+
+  for (const tx of transactions.records) {
+    const exists = await Payment.findOne({ txHash: tx.hash });
+    if (exists) continue;
+
+    const valid = await extractValidPayment(tx);
+    if (!valid) continue;
+
+    const { payOp, memo } = valid;
+
+    const intent = await PaymentIntent.findOne({ memo, status: 'pending' });
+    if (!intent) continue;
+
+    const student = await Student.findOne({ studentId: intent.studentId });
+    if (!student) continue;
+
+    const paymentAmount = parseFloat(payOp.amount);
+    const senderAddress = payOp.from || null;
+    const txDate = new Date(tx.created_at);
+    const txLedger = tx.ledger_attr || tx.ledger || null;
+
+    const isConfirmed = txLedger ? await checkConfirmationStatus(txLedger) : false;
+    const confirmationStatus = isConfirmed ? 'confirmed' : 'pending_confirmation';
+
+    const collision = await detectMemoCollision(memo, senderAddress, paymentAmount, student.feeAmount, txDate);
+
+    const previousPayments = await Payment.aggregate([
+      { $match: { studentId: intent.studentId } },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]);
+    const previousTotal = previousPayments.length ? previousPayments[0].total : 0;
+    const cumulativeTotal = parseFloat((previousTotal + paymentAmount).toFixed(7));
+    const remaining = parseFloat((student.feeAmount - cumulativeTotal).toFixed(7));
+
+    let cumulativeStatus;
+    if (cumulativeTotal < student.feeAmount) {
+      cumulativeStatus = 'underpaid';
+    } else if (cumulativeTotal > student.feeAmount) {
+      cumulativeStatus = 'overpaid';
+    } else {
+      cumulativeStatus = 'valid';
+    }
+
+    const excessAmount = cumulativeStatus === 'overpaid'
+      ? parseFloat((cumulativeTotal - student.feeAmount).toFixed(7))
+      : 0;
+
+    const feeValidation = validatePaymentAgainstFee(paymentAmount, intent.amount);
+
+    await Payment.create({
+      studentId: intent.studentId,
+      txHash: tx.hash,
+      amount: paymentAmount,
+      feeAmount: intent.amount,
+      feeValidationStatus: cumulativeStatus,
+      excessAmount,
+      status: 'confirmed',
+      memo,
+      senderAddress,
+      isSuspicious: collision.suspicious,
+      suspicionReason: collision.reason,
+      ledger: txLedger,
+      confirmationStatus,
+      confirmedAt: txDate,
+      referenceCode: await generateReferenceCode(),
+    });
+
+    if (isConfirmed && !collision.suspicious) {
+      await Student.findOneAndUpdate(
+        { studentId: intent.studentId },
+        {
+          totalPaid: cumulativeTotal,
+          remainingBalance: remaining < 0 ? 0 : remaining,
+          feePaid: cumulativeTotal >= student.feeAmount,
+        }
+      );
+    }
+
+    await PaymentIntent.findByIdAndUpdate(intent._id, { status: 'completed' });
+
+    if (feeValidation.status === 'valid' || feeValidation.status === 'overpaid') {
+      await Student.findOneAndUpdate({ studentId: intent.studentId }, { feePaid: true });
+    }
  * Validate a payment amount against the expected fee.
  */
 function validatePaymentAgainstFee(paymentAmount, expectedFee) {
@@ -121,6 +214,9 @@ async function recordPayment(data) {
     const err = new Error(`Transaction ${data.txHash} has already been processed`);
     err.code = 'DUPLICATE_TX';
     throw err;
+  }
+  if (!data.referenceCode) {
+    data = { ...data, referenceCode: await generateReferenceCode() };
   }
   try {
     return await Payment.create(data);

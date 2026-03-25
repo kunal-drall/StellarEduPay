@@ -40,6 +40,18 @@ const USDC_ISSUER =
 const CONFIRMATION_THRESHOLD = parseInt(process.env.CONFIRMATION_THRESHOLD || '2', 10);
 const POLL_INTERVAL_MS       = parseInt(process.env.POLL_INTERVAL_MS || '30000', 10);
 
+// ── Polling ───────────────────────────────────────────────────────────────────
+const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '30000', 10);
+
+// ── Timeouts ──────────────────────────────────────────────────────────────────
+// Maximum time (ms) an incoming HTTP request may remain open before the server
+// responds with 503. Covers slow Stellar/DB calls on any route.
+const REQUEST_TIMEOUT_MS = parseInt(process.env.REQUEST_TIMEOUT_MS || '30000', 10);
+
+// Maximum time (ms) allowed for a single outbound Stellar Horizon API call.
+const STELLAR_TIMEOUT_MS = parseInt(process.env.STELLAR_TIMEOUT_MS || '10000', 10);
+
+// ── Freeze to prevent accidental mutation at runtime ─────────────────────────
 const config = Object.freeze({
   PORT,
   MONGO_URI,
@@ -50,6 +62,8 @@ const config = Object.freeze({
   USDC_ISSUER,
   CONFIRMATION_THRESHOLD,
   POLL_INTERVAL_MS,
+  REQUEST_TIMEOUT_MS,
+  STELLAR_TIMEOUT_MS,
 });
 
 module.exports = config;

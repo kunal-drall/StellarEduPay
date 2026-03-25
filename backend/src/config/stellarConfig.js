@@ -3,7 +3,9 @@
 const StellarSdk = require('@stellar/stellar-sdk');
 const config = require('./index');
 
-const server = new StellarSdk.Horizon.Server(config.HORIZON_URL);
+const server = new StellarSdk.Horizon.Server(config.HORIZON_URL, {
+  timeout: config.STELLAR_TIMEOUT_MS,
+});
 
 const networkPassphrase = config.IS_TESTNET
   ? StellarSdk.Networks.TESTNET
