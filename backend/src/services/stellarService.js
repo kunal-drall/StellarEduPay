@@ -126,7 +126,13 @@ async function syncPayments() {
     const isConfirmed = txLedger ? await checkConfirmationStatus(txLedger) : false;
     const confirmationStatus = isConfirmed ? 'confirmed' : 'pending_confirmation';
 
-    const collision = await detectMemoCollision(student._id, senderAddress, paymentAmount, student.feeAmount, txDate);
+    const [collision, abnormal] = await Promise.all([
+      detectMemoCollision(student._id, senderAddress, paymentAmount, student.feeAmount, txDate),
+      detectAbnormalPatterns(senderAddress, paymentAmount, student.feeAmount, txDate, null),
+    ]);
+
+    const isSuspicious = collision.suspicious || abnormal.suspicious;
+    const suspicionReason = [collision.reason, abnormal.reason].filter(Boolean).join('; ') || null;
 
     const previousPayments = await Payment.aggregate([
       { $match: { studentId: student._id, status: 'SUCCESS' } },
@@ -161,15 +167,15 @@ async function syncPayments() {
       status: 'SUCCESS',
       memo,
       senderAddress,
-      isSuspicious: collision.suspicious,
-      suspicionReason: collision.reason,
+      isSuspicious: isSuspicious,
+      suspicionReason: suspicionReason,
       ledgerSequence: txLedger,
       confirmationStatus,
       confirmedAt: txDate,
       referenceCode: await generateReferenceCode(),
     });
 
-    if (isConfirmed && !collision.suspicious) {
+    if (isConfirmed && !isSuspicious) {
       await Student.findOneAndUpdate(
         { studentId: intent.studentId },
         {
@@ -245,6 +251,53 @@ async function detectMemoCollision(memo, senderAddress, paymentAmount, expectedF
       reason: `Memo "${memo}" was used by a different sender (${recentFromOtherSender.senderAddress}) within the last 24 hours`,
     };
   }
+}
+
+/**
+ * Detect abnormal payment patterns:
+ *  1. Rapid repeated transactions — same sender sends more than RAPID_TX_LIMIT
+ *     payments within RAPID_TX_WINDOW_MS.
+ *  2. Unusual amount — payment deviates from the expected fee by more than
+ *     UNUSUAL_AMOUNT_MULTIPLIER (e.g. 3×).
+ *
+ * Returns { suspicious: boolean, reason: string|null }
+ */
+async function detectAbnormalPatterns(senderAddress, paymentAmount, expectedFee, txDate, schoolId) {
+  const RAPID_TX_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+  const RAPID_TX_LIMIT = 3;                   // more than this many = suspicious
+  const UNUSUAL_AMOUNT_MULTIPLIER = 3;        // >3× or <1/3 of expected fee
+
+  const reasons = [];
+
+  // 1. Velocity check — rapid repeated transactions from the same sender
+  if (senderAddress) {
+    const windowStart = new Date(txDate.getTime() - RAPID_TX_WINDOW_MS);
+    const recentCount = await Payment.countDocuments({
+      schoolId,
+      senderAddress,
+      confirmedAt: { $gte: windowStart },
+    });
+    if (recentCount >= RAPID_TX_LIMIT) {
+      reasons.push(
+        `Sender ${senderAddress} made ${recentCount + 1} transactions within 10 minutes`
+      );
+    }
+  }
+
+  // 2. Unusual amount check
+  if (expectedFee && expectedFee > 0) {
+    const ratio = paymentAmount / expectedFee;
+    if (ratio > UNUSUAL_AMOUNT_MULTIPLIER || ratio < 1 / UNUSUAL_AMOUNT_MULTIPLIER) {
+      reasons.push(
+        `Unusual payment amount ${paymentAmount} vs expected fee ${expectedFee} (ratio ${ratio.toFixed(2)})`
+      );
+    }
+  }
+
+  if (reasons.length > 0) {
+    return { suspicious: true, reason: reasons.join('; ') };
+  }
+  return { suspicious: false, reason: null };
 }
 
 /**
@@ -540,6 +593,7 @@ module.exports = {
   normalizeAmount,
   extractValidPayment,
   detectMemoCollision,
+  detectAbnormalPatterns,
   finalizeConfirmedPayments,
   checkConfirmationStatus,
   recordPayment,
