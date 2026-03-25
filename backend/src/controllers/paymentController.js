@@ -23,6 +23,7 @@ const {
   finalizeConfirmedPayments,
 } = require('../services/stellarService');
 const { queueForRetry } = require('../services/retryService');
+const { enqueueTransaction, getJobStatus } = require('../queue/transactionQueue');
 const { SCHOOL_WALLET, ACCEPTED_ASSETS, server } = require('../config/stellarConfig');
 const StellarSdk = require('@stellar/stellar-sdk');
 
@@ -217,7 +218,7 @@ async function verifyPayment(req, res, next) {
     const { schoolId } = req;
     const { txHash } = req.body;
 
-    // Check if we've already recorded this transaction
+    // Check if already recorded
     const existing = await Payment.findOne({ txHash });
     if (existing) {
       const err = new Error('Transaction ' + txHash + ' has already been processed');
@@ -225,126 +226,34 @@ async function verifyPayment(req, res, next) {
       return next(err);
     }
 
-    let result;
-    try {
-      result = await verifyTransaction(txHash, req.school.stellarAddress);
-    } catch (stellarErr) {
-      // Record a failed payment entry for known failure codes so we have an audit trail
-      if (PERMANENT_FAIL_CODES.includes(stellarErr.code)) {
-        await Payment.create({
-          schoolId,
-          studentId: 'unknown',
-          txHash: txHash,
-          amount: 0,
-          status: 'FAILED',
-          feeValidationStatus: 'unknown',
-        }).catch(() => {});
-        return next(stellarErr);
-      }
-
-      await queueForRetry(txHash, req.body.studentId || null, stellarErr.message, schoolId);
-      return res.status(202).json({
-        message: 'Stellar network is temporarily unavailable. Your transaction has been queued and will be verified automatically.',
-        txHash,
-        status: 'queued_for_retry',
-      });
-    }
-
-    if (!result) {
-      return res.status(404).json({
-        error: 'Transaction found but contains no valid payment to this school wallet',
-        code: 'NOT_FOUND',
-      });
-    }
-
-    const studentStrId = result.studentId || result.memo;
-    const studentObj = await Student.findOne({ studentId: studentStrId });
-    if (!studentObj) {
-      return res.status(404).json({ error: 'Associated student not found. Cannot record transaction.' });
-    }
-
-    // Reject if the payment intent has expired
-    const intent = await PaymentIntent.findOne({ memo: result.memo, schoolId });
-    if (intent) {
-      if (intent.expiresAt && intent.expiresAt < new Date()) {
-        await PaymentIntent.findByIdAndUpdate(intent._id, { status: 'expired' });
-        const err = new Error('Payment intent has expired. Please request new payment instructions.');
-        err.code = 'INTENT_EXPIRED';
-        err.status = 410;
-        return next(err);
-      }
-    }
-
-    // Persist the verified payment
-    const now = new Date();
-
-    // Reject underpaid transactions — do not record as SUCCESS
-    if (result.feeValidation.status === 'underpaid') {
-      const err = new Error(result.feeValidation.message);
-      err.code = 'UNDERPAID';
-      err.status = 400;
-      err.details = {
-        paid: result.amount,
-        required: result.feeAmount,
-        shortfall: parseFloat((result.feeAmount - result.amount).toFixed(7)),
-      };
-      return next(err);
-    }
-
-    await recordPayment({
+    // Enqueue for async processing — returns immediately so spikes are absorbed
+    const job = await enqueueTransaction(txHash, {
       schoolId,
-      studentId: result.studentId || result.memo,
-      txHash: result.hash,
-      amount: result.amount,
-      feeAmount: result.feeAmount,
-      feeValidationStatus: result.feeValidation.status,
-      excessAmount: result.feeValidation.excessAmount,
-      networkFee: result.networkFee, // Store the extracted network fee
-      status: 'SUCCESS',
-      memo: result.memo,
-      senderAddress: result.senderAddress || null,
-      ledgerSequence: result.ledger || null,
-      confirmationStatus: 'confirmed',
-      confirmedAt: result.date ? new Date(result.date) : now,
-      verifiedAt: now,
+      school: req.school,
+      studentId: req.body.studentId || null,
     });
 
-    const targetCurrency = req.school.localCurrency || 'USD';
-    const conversion = await convertToLocalCurrency(result.amount, result.assetCode || 'XLM', targetCurrency);
-
-    res.json({
-      verified: true,
-      hash: result.hash,
-      memo: result.memo,
-      studentId: result.studentId || result.memo,
-      amount: result.amount,
-      assetCode: result.assetCode,
-      assetType: result.assetType,
-      feeAmount: result.feeAmount,
-      feeValidation: result.feeValidation,
-      networkFee: result.networkFee,
-      date: result.date,
-      localCurrency: {
-        amount:        conversion.available ? conversion.localAmount : null,
-        currency:      conversion.currency,
-        rate:          conversion.rate,
-        rateTimestamp: conversion.rateTimestamp,
-        available:     conversion.available,
-      },
+    return res.status(202).json({
+      message: 'Transaction queued for processing',
+      txHash,
+      jobId: job.id,
+      statusUrl: `/api/payments/queue/${txHash}`,
     });
   } catch (err) {
-    // Retry queue logic for transient errors
-    if (PERMANENT_FAIL_CODES.includes(err.code)) {
-      // Ensure no 'orphan' payments can be created in the system
-      return next(err);
-    }
+    next(err);
+  }
+}
 
-    await queueForRetry(req.body.txHash, req.body.studentId || null, err.message);
-    return res.status(202).json({
-      message: 'Stellar network is temporarily unavailable. Your transaction has been queued.',
-      txHash: req.body.txHash,
-      status: 'queued_for_retry',
-    });
+async function getQueueJobStatus(req, res, next) {
+  try {
+    const { txHash } = req.params;
+    const status = await getJobStatus(txHash);
+    if (!status) {
+      return res.status(404).json({ error: 'No queued job found for this transaction hash', code: 'NOT_FOUND' });
+    }
+    res.json(status);
+  } catch (err) {
+    next(err);
   }
 }
 
@@ -850,4 +759,6 @@ module.exports = {
   retryDeadLetterJob,
   lockPaymentForUpdate,
   unlockPayment,
+  generateReceipt,
+  getQueueJobStatus,
 };
