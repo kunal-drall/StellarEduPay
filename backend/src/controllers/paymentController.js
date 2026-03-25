@@ -23,6 +23,11 @@ const {
 } = require('../services/stellarService');
 const { queueForRetry } = require('../services/retryService');
 const { ACCEPTED_ASSETS } = require('../config/stellarConfig');
+const {
+  convertToLocalCurrency,
+  enrichPaymentWithConversion,
+  getCachedRates,
+} = require('../services/currencyConversionService');
 const crypto = require('crypto');
 
 const PERMANENT_FAIL_CODES = ['TX_FAILED', 'MISSING_MEMO', 'INVALID_DESTINATION', 'UNSUPPORTED_ASSET'];
@@ -38,14 +43,30 @@ function wrapStellarError(err) {
 // GET /api/payments/instructions/:studentId
 async function getPaymentInstructions(req, res, next) {
   try {
+    const targetCurrency = req.school.localCurrency || 'USD';
+
+    // Optionally include the student's fee amount in local currency
+    let feeConversion = null;
+    const student = await Student.findOne({ schoolId: req.schoolId, studentId: req.params.studentId });
+    if (student && student.feeAmount) {
+      feeConversion = await convertToLocalCurrency(student.feeAmount, 'XLM', targetCurrency);
+    }
+
     res.json({
-      walletAddress: req.school.stellarAddress, // per-school wallet, not global
+      walletAddress: req.school.stellarAddress,
       memo: req.params.studentId,
       acceptedAssets: Object.values(ACCEPTED_ASSETS).map(a => ({
         code: a.code,
         type: a.type,
         displayName: a.displayName,
       })),
+      feeAmount: student ? student.feeAmount : null,
+      feeLocalEquivalent: feeConversion && feeConversion.available ? {
+        amount:        feeConversion.localAmount,
+        currency:      feeConversion.currency,
+        rate:          feeConversion.rate,
+        rateTimestamp: feeConversion.rateTimestamp,
+      } : null,
       note: 'Include the payment intent memo exactly when sending payment to ensure your fees are credited.',
     });
   } catch (err) {
@@ -138,6 +159,9 @@ async function verifyPayment(req, res, next) {
       verifiedAt: now,
     });
 
+    const targetCurrency = req.school.localCurrency || 'USD';
+    const conversion = await convertToLocalCurrency(result.amount, result.assetCode || 'XLM', targetCurrency);
+
     res.json({
       verified: true,
       hash: result.hash,
@@ -149,6 +173,13 @@ async function verifyPayment(req, res, next) {
       feeAmount: result.feeAmount,
       feeValidation: result.feeValidation,
       date: result.date,
+      localCurrency: {
+        amount:        conversion.available ? conversion.localAmount : null,
+        currency:      conversion.currency,
+        rate:          conversion.rate,
+        rateTimestamp: conversion.rateTimestamp,
+        available:     conversion.available,
+      },
     });
   } catch (err) {
     next(err);
@@ -178,10 +209,16 @@ async function finalizePayments(req, res, next) {
 // GET /api/payments/:studentId
 async function getStudentPayments(req, res, next) {
   try {
+    const targetCurrency = req.school.localCurrency || 'USD';
     const payments = await Payment
       .find({ schoolId: req.schoolId, studentId: req.params.studentId })
-      .sort({ confirmedAt: -1 });
-    res.json(payments);
+      .sort({ confirmedAt: -1 })
+      .lean();
+
+    const enriched = await Promise.all(
+      payments.map(p => enrichPaymentWithConversion(p, targetCurrency))
+    );
+    res.json(enriched);
   } catch (err) {
     next(err);
   }
@@ -234,6 +271,17 @@ async function getStudentBalance(req, res, next) {
       ? parseFloat((totalPaid - student.feeAmount).toFixed(7))
       : 0;
 
+    const targetCurrency = req.school.localCurrency || 'USD';
+    const [feeConv, paidConv, remainingConv] = await Promise.all([
+      convertToLocalCurrency(student.feeAmount, 'XLM', targetCurrency),
+      convertToLocalCurrency(totalPaid, 'XLM', targetCurrency),
+      convertToLocalCurrency(remainingBalance, 'XLM', targetCurrency),
+    ]);
+
+    const buildLocal = (conv) => conv.available
+      ? { amount: conv.localAmount, currency: conv.currency, rate: conv.rate, rateTimestamp: conv.rateTimestamp }
+      : null;
+
     res.json({
       studentId,
       feeAmount: student.feeAmount,
@@ -242,6 +290,14 @@ async function getStudentBalance(req, res, next) {
       excessAmount,
       feePaid: totalPaid >= student.feeAmount,
       installmentCount: result.length ? result[0].count : 0,
+      localCurrency: {
+        currency:         targetCurrency,
+        available:        feeConv.available,
+        rateTimestamp:    feeConv.rateTimestamp,
+        feeAmount:        buildLocal(feeConv),
+        totalPaid:        buildLocal(paidConv),
+        remainingBalance: buildLocal(remainingConv),
+      },
     });
   } catch (err) {
     next(err);
@@ -290,6 +346,36 @@ async function getRetryQueue(req, res) {
   }
 }
 
+// GET /api/payments/rates
+// Returns the current cached exchange rates and their freshness timestamp.
+// Useful for the frontend to display "rate as of HH:MM" next to amounts.
+async function getExchangeRates(req, res, next) {
+  try {
+    const targetCurrency = req.school.localCurrency || 'USD';
+    const { _getRates } = require('../services/currencyConversionService');
+    const rateEntry = await _getRates(targetCurrency);
+
+    if (!rateEntry) {
+      return res.json({
+        available: false,
+        currency: targetCurrency,
+        rates: null,
+        rateTimestamp: null,
+        message: 'Price feed is currently unavailable. Amounts are shown in XLM only.',
+      });
+    }
+
+    res.json({
+      available: true,
+      currency: targetCurrency,
+      rates: rateEntry.rates,
+      rateTimestamp: rateEntry.fetchedAt.toISOString(),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getPaymentInstructions,
   createPaymentIntent,
@@ -303,4 +389,5 @@ module.exports = {
   getSuspiciousPayments,
   getPendingPayments,
   getRetryQueue,
+  getExchangeRates,
 };

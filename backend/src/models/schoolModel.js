@@ -23,6 +23,12 @@ const schoolSchema = new mongoose.Schema(
     isActive:       { type: Boolean, default: true, index: true },
     adminEmail:     { type: String, default: null },
     address:        { type: String, default: null },
+    /**
+     * Preferred local currency for fee display (ISO 4217 code, uppercase).
+     * Used by the currency conversion layer to show fiat equivalents.
+     * e.g. "USD" for US schools, "PGK" for Papua New Guinea, "NGN" for Nigeria.
+     */
+    localCurrency:  { type: String, default: 'USD', uppercase: true, trim: true },
   },
   { timestamps: true }
 );

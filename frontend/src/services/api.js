@@ -24,3 +24,5 @@ export const getReportCsvUrl = (params = {}) => {
   return `${base}/reports?${query}`;
 };
 
+// Currency conversion
+export const getConversionRates = () => api.get('/payments/rates');

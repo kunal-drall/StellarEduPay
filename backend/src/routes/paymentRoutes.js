@@ -15,6 +15,7 @@ const {
   getSuspiciousPayments,
   getPendingPayments,
   getRetryQueue,
+  getExchangeRates,
 } = require('../controllers/paymentController');
 const { validateStudentIdParam, validateVerifyPayment } = require('../middleware/validate');
 const { resolveSchool } = require('../middleware/schoolContext');
@@ -28,6 +29,7 @@ router.get('/overpayments',                       getOverpayments);
 router.get('/suspicious',                         getSuspiciousPayments);
 router.get('/pending',                            getPendingPayments);
 router.get('/retry-queue',                        getRetryQueue);
+router.get('/rates',                              getExchangeRates);
 router.get('/balance/:studentId',                 validateStudentIdParam, getStudentBalance);
 router.get('/instructions/:studentId',            validateStudentIdParam, getPaymentInstructions);
 
