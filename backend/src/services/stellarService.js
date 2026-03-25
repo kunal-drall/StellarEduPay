@@ -21,7 +21,6 @@ function normalizeAmount(rawAmount) {
   return parseFloat(parseFloat(rawAmount).toFixed(7));
 }
 
-async function extractValidPayment(tx) {
 /**
  * Extract and validate the payment operation from a transaction.
  * walletAddress is passed explicitly — supports per-school wallets.
@@ -59,211 +58,6 @@ function validatePaymentAgainstFee(paymentAmount, expectedFee) {
       message: `Payment of ${paymentAmount} exceeds the required fee of ${expectedFee} by ${excess}`,
     };
   }
-  return {
-    status: 'valid',
-    excessAmount: 0,
-    message: 'Payment matches the required fee',
-  };
-}
-
-async function checkConfirmationStatus(txLedger) {
-  const latestLedger = await server.ledgers().order('desc').limit(1).call();
-  const latestSequence = latestLedger.records[0].sequence;
-  return (latestSequence - txLedger) >= CONFIRMATION_THRESHOLD;
-}
-
-async function detectMemoCollision(studentObjId, senderAddress, paymentAmount, expectedFee, txDate) {
-  const COLLISION_WINDOW_MS = 24 * 60 * 60 * 1000;
-  const windowStart = new Date(txDate.getTime() - COLLISION_WINDOW_MS);
-
-  const recentFromOtherSender = await Payment.findOne({
-    studentId: studentObjId,
-    senderAddress: { $ne: senderAddress, $ne: null },
-    confirmedAt: { $gte: windowStart },
-  });
-
-  if (recentFromOtherSender) {
-    return {
-      suspicious: true,
-      reason: `The student ID was used by a different sender (${recentFromOtherSender.senderAddress}) within the last 24 hours`,
-    };
-  }
-
-  if (paymentAmount <= 0 || paymentAmount > expectedFee * 2) {
-    return {
-      suspicious: true,
-      reason: `Unusual payment amount ${paymentAmount} for expected fee ${expectedFee}`,
-    };
-  }
-
-  return { suspicious: false, reason: null };
-}
-
-/**
- * Detect abnormal payment patterns:
- *  1. Velocity — same sender exceeds RAPID_TX_LIMIT payments within RAPID_TX_WINDOW_MS.
- *  2. Unusual amount — payment ratio vs expected fee exceeds UNUSUAL_AMOUNT_MULTIPLIER.
- *
- * Thresholds are env-configurable with safe defaults.
- */
-async function detectAbnormalPatterns(senderAddress, paymentAmount, expectedFee, txDate) {
-  const RAPID_TX_WINDOW_MS      = parseInt(process.env.RAPID_TX_WINDOW_MS, 10)      || 10 * 60 * 1000;
-  const RAPID_TX_LIMIT          = parseInt(process.env.RAPID_TX_LIMIT, 10)          || 3;
-  const UNUSUAL_AMOUNT_MULTIPLIER = parseFloat(process.env.UNUSUAL_AMOUNT_MULTIPLIER) || 3;
-
-  const reasons = [];
-
-  if (senderAddress) {
-    const windowStart = new Date(txDate.getTime() - RAPID_TX_WINDOW_MS);
-    const recentCount = await Payment.countDocuments({
-      senderAddress,
-      confirmedAt: { $gte: windowStart },
-    });
-    if (recentCount >= RAPID_TX_LIMIT) {
-      reasons.push(`Sender ${senderAddress} made ${recentCount + 1} transactions within ${RAPID_TX_WINDOW_MS / 60000} minutes`);
-    }
-  }
-
-  if (expectedFee > 0) {
-    const ratio = paymentAmount / expectedFee;
-    if (ratio > UNUSUAL_AMOUNT_MULTIPLIER || ratio < 1 / UNUSUAL_AMOUNT_MULTIPLIER) {
-      reasons.push(`Unusual amount ${paymentAmount} vs expected fee ${expectedFee} (ratio ${ratio.toFixed(2)})`);
-    }
-  }
-
-  return reasons.length > 0
-    ? { suspicious: true, reason: reasons.join('; ') }
-    : { suspicious: false, reason: null };
-}
-
-async function syncPayments() {
-  const transactions = await server
-    .transactions()
-    .forAccount(SCHOOL_WALLET)
-    .order('desc')
-    .limit(20)
-    .call();
-
-  for (const tx of transactions.records) {
-    const exists = await Payment.findOne({ transactionHash: tx.hash });
-    if (exists) continue;
-
-    const valid = await extractValidPayment(tx);
-    if (!valid) continue;
-
-    const { payOp, memo } = valid;
-
-    const intent = await PaymentIntent.findOne({ memo, status: 'pending' });
-    if (!intent) continue;
-
-    // Reject expired intents
-    if (intent.expiresAt && intent.expiresAt < new Date(tx.created_at)) {
-      await PaymentIntent.findByIdAndUpdate(intent._id, { status: 'expired' });
-      continue;
-    }
-
-    const student = await Student.findOne({ studentId: intent.studentId });
-    if (!student) continue;
-
-    const paymentAmount = parseFloat(payOp.amount);
-    const senderAddress = payOp.from || null;
-    const txDate = new Date(tx.created_at);
-    const txLedger = tx.ledger_attr || tx.ledger || null;
-
-    const isConfirmed = txLedger ? await checkConfirmationStatus(txLedger) : false;
-    const confirmationStatus = isConfirmed ? 'confirmed' : 'pending_confirmation';
-
-    const [collision, abnormal] = await Promise.all([
-      detectMemoCollision(student._id, senderAddress, paymentAmount, student.feeAmount, txDate),
-      detectAbnormalPatterns(senderAddress, paymentAmount, student.feeAmount, txDate),
-    ]);
-      detectAbnormalPatterns(senderAddress, paymentAmount, student.feeAmount, txDate, null),
-    ]);
-
-    const isSuspicious = collision.suspicious || abnormal.suspicious;
-    const suspicionReason = [collision.reason, abnormal.reason].filter(Boolean).join('; ') || null;
-
-    const previousPayments = await Payment.aggregate([
-      { $match: { studentId: student._id, status: 'SUCCESS' } },
-      { $group: { _id: null, total: { $sum: '$amount' } } },
-    ]);
-    const previousTotal = previousPayments.length ? previousPayments[0].total : 0;
-    const cumulativeTotal = parseFloat((previousTotal + paymentAmount).toFixed(7));
-    const remaining = parseFloat((student.feeAmount - cumulativeTotal).toFixed(7));
-
-    let cumulativeStatus;
-    if (cumulativeTotal < student.feeAmount) {
-      cumulativeStatus = 'underpaid';
-    } else if (cumulativeTotal > student.feeAmount) {
-      cumulativeStatus = 'overpaid';
-    } else {
-      cumulativeStatus = 'valid';
-    }
-
-    const excessAmount = cumulativeStatus === 'overpaid'
-      ? parseFloat((cumulativeTotal - student.feeAmount).toFixed(7))
-      : 0;
-
-    const feeValidation = validatePaymentAgainstFee(paymentAmount, intent.amount);
-
-    await Payment.create({
-      studentId: student._id,
-      transactionHash: tx.hash,
-      amount: paymentAmount,
-      feeAmount: intent.amount,
-      feeValidationStatus: cumulativeStatus,
-      excessAmount,
-      status: 'SUCCESS',
-      memo,
-      senderAddress,
-      isSuspicious: isSuspicious,
-      suspicionReason: suspicionReason,
-      ledgerSequence: txLedger,
-      confirmationStatus,
-      confirmedAt: txDate,
-      referenceCode: await generateReferenceCode(),
-    });
-
-    if (isConfirmed && !isSuspicious) {
-      await Student.findOneAndUpdate(
-        { studentId: intent.studentId },
-        {
-          totalPaid: cumulativeTotal,
-          remainingBalance: remaining < 0 ? 0 : remaining,
-          feePaid: cumulativeTotal >= student.feeAmount,
-        }
-      );
-    }
-
-    await PaymentIntent.findByIdAndUpdate(intent._id, { status: 'completed' });
-
-    if (feeValidation.status === 'valid' || feeValidation.status === 'overpaid') {
-      await Student.findOneAndUpdate({ studentId: intent.studentId }, { feePaid: true });
-    }
-  }
-}
-
-/**
- * Validate a payment amount against the expected fee.
- */
-function validatePaymentAgainstFee(paymentAmount, expectedFee) {
-  if (paymentAmount < expectedFee) {
-    return {
-      status: 'underpaid',
-      excessAmount: 0,
-      message: 'Payment of ' + paymentAmount + ' is less than the required fee of ' + expectedFee,
-    };
-  }
-
-  if (paymentAmount > expectedFee) {
-    const excess = parseFloat((paymentAmount - expectedFee).toFixed(7));
-    return {
-      status: 'overpaid',
-      excessAmount: excess,
-      message: 'Payment of ' + paymentAmount + ' exceeds the required fee of ' + expectedFee + ' by ' + excess,
-    };
-  }
-
   return {
     status: 'valid',
     excessAmount: 0,
@@ -403,9 +197,6 @@ async function verifyTransaction(txHash, walletAddress) {
     throw err;
   }
 
-  const memoStr = tx.memo ? tx.memo.trim() : null;
-  if (!memoStr) {
-  // 2. Extract and validate memo
   const memo = tx.memo ? tx.memo.trim() : null;
   if (!memo) {
     const err = new Error('Transaction memo is missing or empty — cannot identify student');
@@ -414,11 +205,6 @@ async function verifyTransaction(txHash, walletAddress) {
   }
 
   const ops = await tx.operations();
-  const validPayOp = ops.records.find(op => op.type === 'payment' && op.to === SCHOOL_WALLET);
-  if (!validPayOp) {
-    const err = new Error(`No payment operation found targeting the school wallet (${SCHOOL_WALLET})`);
-  // 3. Confirm payment operation targets this school's wallet
-  const ops = await tx.operations();
   const payOp = ops.records.find(op => op.type === 'payment' && op.to === walletAddress);
   if (!payOp) {
     const err = new Error(`No payment operation found targeting the school wallet (${walletAddress})`);
@@ -426,10 +212,6 @@ async function verifyTransaction(txHash, walletAddress) {
     throw err;
   }
 
-  const validAsset = detectAsset(validPayOp);
-  if (!validAsset) {
-    const assetCode = validPayOp.asset_type === 'native' ? 'XLM' : (validPayOp.asset_code || validPayOp.asset_type);
-  // 4. Validate asset is accepted
   const asset = detectAsset(payOp);
   if (!asset) {
     const assetCode = payOp.asset_type === 'native' ? 'XLM' : (payOp.asset_code || payOp.asset_type);
@@ -439,8 +221,6 @@ async function verifyTransaction(txHash, walletAddress) {
     throw err;
   }
 
-  const amountExtracted = normalizeAmount(validPayOp.amount);
-  const student = await Student.findOne({ studentId: memoStr });
   const amount = normalizeAmount(payOp.amount);
 
   // 5. Validate payment amount is within configured limits
@@ -457,27 +237,28 @@ async function verifyTransaction(txHash, walletAddress) {
   const feeAmount = student ? student.feeAmount : null;
   
   const feeValidation = feeAmount != null
-    ? validatePaymentAgainstFee(amountExtracted, feeAmount)
     ? validatePaymentAgainstFee(amount, feeAmount)
     : { status: 'unknown', excessAmount: 0, message: 'Student not found, cannot validate fee' };
 
+  // Extract network fee from transaction
+  const networkFee = parseFloat(tx.fee_paid || '0') / 10000000; // Convert stroops to XLM
+
   return {
     hash: tx.hash,
-    memo: memoStr,
-    studentId: memoStr,
-    amount: amountExtracted,
-    assetCode: validAsset.assetCode,
-    assetType: validAsset.assetType,
+    memo: memo,
+    studentId: memo,
+    amount: amount,
+    assetCode: asset.assetCode,
+    assetType: asset.assetType,
     feeAmount,
     feeValidation,
+    networkFee,
     date: tx.created_at,
     ledger: tx.ledger_attr || tx.ledger || null,
-    senderAddress: validPayOp.from || null,
+    senderAddress: payOp.from || null,
   };
 }
 
-async function finalizeConfirmedPayments() {
-  const pending = await Payment.find({ confirmationStatus: 'pending_confirmation', isSuspicious: false });
 /**
  * Fetch recent transactions for a specific school wallet and record new payments.
  *
@@ -634,7 +415,6 @@ async function finalizeConfirmedPayments(schoolId) {
       await Payment.findByIdAndUpdate(payment._id, { confirmationStatus: 'confirmed' });
     }
 
-    const student = await Student.findById(payment.studentId);
     const student = await Student.findOne({ schoolId, studentId: payment.studentId });
     if (!student) continue;
 
@@ -642,15 +422,40 @@ async function finalizeConfirmedPayments(schoolId) {
       { $match: { schoolId, studentId: payment.studentId, confirmationStatus: 'confirmed', isSuspicious: false } },
       { $group: { _id: null, total: { $sum: '$amount' } } },
     ]);
-    const totalPaid = aggregate.length ? parseFloat(aggregate[0].total.toFixed(7)) : 0;
+    const totalPaid = agg.length ? parseFloat(agg[0].total.toFixed(7)) : 0;
     const remainingBalance = parseFloat(Math.max(0, student.feeAmount - totalPaid).toFixed(7));
 
-    await Student.findByIdAndUpdate(
-      payment.studentId,
     await Student.findOneAndUpdate(
       { schoolId, studentId: payment.studentId },
       { totalPaid, remainingBalance, feePaid: totalPaid >= student.feeAmount }
     );
+  }
+}
+
+/**
+ * Persist a payment record, enforcing uniqueness on txHash.
+ * Throws DUPLICATE_TX if already recorded.
+ * data must include schoolId.
+ */
+async function recordPayment(data) {
+  const exists = await Payment.findOne({ transactionHash: data.transactionHash });
+  if (exists) {
+    const err = new Error(`Transaction ${data.transactionHash} has already been processed`);
+    err.code = 'DUPLICATE_TX';
+    throw err;
+  }
+  if (!data.referenceCode) {
+    data = { ...data, referenceCode: await generateReferenceCode() };
+  }
+  try {
+    return await Payment.create(data);
+  } catch (e) {
+    if (e.code === 11000) {
+      const err = new Error(`Transaction ${data.transactionHash} has already been processed`);
+      err.code = 'DUPLICATE_TX';
+      throw err;
+    }
+    throw err;
   }
 }
 
@@ -666,5 +471,4 @@ module.exports = {
   finalizeConfirmedPayments,
   checkConfirmationStatus,
   recordPayment,
-  finalizeConfirmedPayments,
 };
