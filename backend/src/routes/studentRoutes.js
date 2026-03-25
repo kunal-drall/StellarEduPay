@@ -2,6 +2,7 @@
 
 const express = require('express');
 const router = express.Router();
+const { registerStudent, getAllStudents, getStudent, getPaymentSummary } = require('../controllers/studentController');
 const multer = require('multer');
 const { registerStudent, getAllStudents, getStudent, bulkImportStudents } = require('../controllers/studentController');
 const { validateRegisterStudent, validateStudentIdParam } = require('../middleware/validate');
@@ -14,6 +15,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 router.use(resolveSchool);
 
 router.post('/',             validateRegisterStudent, registerStudent);
+router.get('/summary',       getPaymentSummary);
 router.post('/bulk',         upload.single('file'),   bulkImportStudents);
 router.get('/',              getAllStudents);
 router.get('/:studentId',    validateStudentIdParam, getStudent);
