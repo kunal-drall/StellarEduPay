@@ -14,6 +14,7 @@
 const REQUIRED = [
   'MONGO_URI',
   'SCHOOL_WALLET_ADDRESS',
+  'STELLAR_NETWORK_PASSPHRASE',
 ];
 
 const missing = REQUIRED.filter((key) => !process.env[key]);
@@ -34,6 +35,8 @@ const MONGO_URI = process.env.MONGO_URI;
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK || 'testnet';
 const IS_TESTNET = STELLAR_NETWORK !== 'mainnet';
 
+const STELLAR_NETWORK_PASSPHRASE = process.env.STELLAR_NETWORK_PASSPHRASE;
+
 const HORIZON_URL =
   process.env.HORIZON_URL ||
   (IS_TESTNET
@@ -53,17 +56,24 @@ const CONFIRMATION_THRESHOLD = parseInt(process.env.CONFIRMATION_THRESHOLD || '2
 // ── Polling ───────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '30000', 10);
 
+// ── Retry Service ─────────────────────────────────────────────────────────────
+const RETRY_INTERVAL_MS = parseInt(process.env.RETRY_INTERVAL_MS || '60000', 10);
+const RETRY_MAX_ATTEMPTS = parseInt(process.env.RETRY_MAX_ATTEMPTS || '10', 10);
+
 // ── Freeze to prevent accidental mutation at runtime ─────────────────────────
 const config = Object.freeze({
   PORT,
   MONGO_URI,
   STELLAR_NETWORK,
   IS_TESTNET,
+  STELLAR_NETWORK_PASSPHRASE,
   HORIZON_URL,
   SCHOOL_WALLET_ADDRESS,
   USDC_ISSUER,
   CONFIRMATION_THRESHOLD,
   POLL_INTERVAL_MS,
+  RETRY_INTERVAL_MS,
+  RETRY_MAX_ATTEMPTS,
 });
 
 module.exports = config;

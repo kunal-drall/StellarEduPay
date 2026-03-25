@@ -93,15 +93,15 @@ Copy the **public key** — this is your `SCHOOL_WALLET_ADDRESS`. Never share th
 
 ### 2. Configure environment variables
 
-**`backend/.env`**
-```
-MONGO_URI=mongodb://localhost:27017/stellaredupay
-STELLAR_NETWORK=testnet
-SCHOOL_WALLET_ADDRESS=your_school_stellar_public_key
-PORT=5000
+Create your local environment file by copying the unified template:
+
+```bash
+cp .env.example .env
 ```
 
-**`frontend/.env.local`**
+Open `.env` and configure your credentials (e.g., set `SCHOOL_WALLET_ADDRESS` slightly generated above).
+
+For the frontend, specify the backend API URL in **`frontend/.env.local`**:
 ```
 NEXT_PUBLIC_API_URL=http://localhost:5000/api
 ```
