@@ -12,6 +12,7 @@ export default function TransactionCard({ payment }) {
     confirmedAt,
     studentId,
     localCurrency,
+    explorerUrl,
   } = payment;
 
   const formattedAmount = `${parseFloat(amount).toFixed(7)} ${assetCode}`;
@@ -55,10 +56,21 @@ export default function TransactionCard({ payment }) {
         </p>
       )}
 
-      {/* Transaction hash */}
+      {/* Transaction hash + explorer link */}
       <p style={{ margin: '0.25rem 0', fontSize: '0.85rem', color: '#555' }}>
         <strong>Tx:</strong>{' '}
         <code style={{ wordBreak: 'break-all', fontSize: '0.8rem' }}>{txHash}</code>
+        {explorerUrl && (
+          <a
+            href={explorerUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ marginLeft: '0.5rem', fontSize: '0.8rem', color: '#1565c0' }}
+            aria-label="View transaction on Stellar Expert"
+          >
+            View on Explorer ↗
+          </a>
+        )}
       </p>
 
       {/* Date + student */}

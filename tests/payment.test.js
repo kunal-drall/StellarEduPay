@@ -30,15 +30,18 @@ jest.mock('../backend/src/models/studentModel', () => ({
 }));
 
 jest.mock('../backend/src/models/paymentModel', () => ({
-  find: jest.fn().mockReturnValue({ 
+  find: jest.fn().mockReturnValue({
     sort: jest.fn().mockReturnValue({
-      populate: jest.fn().mockResolvedValue([{ studentId: { studentId: 'STU001', name: 'Alice' }, txHash: 'abc123', amount: 200 }])
-    })
+      lean: jest.fn().mockResolvedValue([{ studentId: 'STU001', txHash: 'abc123', amount: 200 }]),
+      populate: jest.fn().mockResolvedValue([{ studentId: { studentId: 'STU001', name: 'Alice' }, txHash: 'abc123', amount: 200 }]),
+    }),
   }),
   findOne: jest.fn().mockReturnValue({
-    sort: jest.fn().mockResolvedValue(null)
+    sort: jest.fn().mockResolvedValue(null),
   }),
   create: jest.fn().mockResolvedValue({}),
+  aggregate: jest.fn().mockResolvedValue([]),
+  countDocuments: jest.fn().mockResolvedValue(0),
 }));
 
 jest.mock('../backend/src/models/paymentIntentModel', () => ({
@@ -149,11 +152,18 @@ jest.mock('../backend/src/services/stellarService', () => ({
   syncPaymentsForSchool: jest.fn().mockResolvedValue(undefined),
   verifyTransaction: jest.fn().mockResolvedValue({
     hash: 'abc123',
-    memo: 'ABCD1234',
+    memo: 'STU001',
+    studentId: 'STU001',
     amount: 200,
+    assetCode: 'XLM',
+    assetType: 'native',
     expectedAmount: 200,
-    feeValidation: { status: 'valid', message: 'Payment matches the required fee' },
+    feeAmount: 200,
+    feeValidation: { status: 'valid', excessAmount: 0, message: 'Payment matches the required fee' },
+    networkFee: 0.00001,
     date: new Date().toISOString(),
+    ledger: 100,
+    senderAddress: 'GSENDER123',
   }),
   recordPayment: jest.fn().mockResolvedValue({}),
   finalizeConfirmedPayments: jest.fn().mockResolvedValue(undefined),
@@ -310,10 +320,7 @@ describe('Fee Structure API', () => {
 
 describe('Payment Intent API', () => {
   test('POST /api/payments/intent — creates a payment intent', async () => {
-    // studentId must be a valid 24-char hex MongoDB ObjectId (enforced by Joi middleware)
-    const res = await request(app).post('/api/payments/intent').send({ studentId: MOCK_STUDENT_OBJ_ID });
-    const res = await request(app)
-      .post('/api/payments/intent')
+    const res = await testApi.post('/api/payments/intent')
       .set('Idempotency-Key', 'test-intent-stu001')
       .send({ studentId: 'STU001' });
     expect(res.status).toBe(201);
@@ -347,6 +354,8 @@ describe('Payment Intent API', () => {
     expect(res.status).toBe(400);
     expect(res.body).toHaveProperty('errors');
     expect(res.body.errors[0]).toHaveProperty('field', 'xdr');
+  });
+
   test('POST /api/v1/payments/intent — 404 for unknown student', async () => {
     const Student = require('../backend/src/models/studentModel');
     Student.findOne.mockResolvedValueOnce(null);

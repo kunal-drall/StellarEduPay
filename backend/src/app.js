@@ -15,6 +15,7 @@ const { runConsistencyCheck } = require('./controllers/consistencyController');
 const { startPolling, stopPolling } = require('./services/transactionPollingService');
 const { startRetryWorker, stopRetryWorker, isRetryWorkerRunning } = require('./services/retryService');
 const { startConsistencyScheduler } = require('./services/consistencyScheduler');
+const { initializeRetryQueue, setupMonitoring } = require('./config/retryQueueSetup');
 const { initializeRetryQueue, setupMonitoring, getSystemStatus } = require('./config/retryQueueSetup');
 const database = require('./config/database');
 const { concurrentPaymentProcessor } = require('./services/concurrentPaymentProcessor');
@@ -29,22 +30,23 @@ app.use(cors());
 app.use(express.json());
 app.use(requestLogger());
 
+// Concurrent request handling middleware
 const concurrentMiddleware = createConcurrentRequestMiddleware({
   circuitBreaker: {
     failureThreshold: 5,
     resetTimeoutMs: 30000,
-    halfOpenSuccessThreshold: 2
+    halfOpenSuccessThreshold: 2,
   },
   queue: {
     maxConcurrent: 50,
     maxSize: 1000,
-    defaultTimeoutMs: 30000
+    defaultTimeoutMs: 30000,
   },
   rateLimit: {
     windowMs: 60000,
-    maxRequests: 100
+    maxRequests: 100,
   },
-  deduplicationTtlMs: 60000
+  deduplicationTtlMs: 60000,
 });
 
 app.use(concurrentMiddleware.rateLimiter((req) => req.ip));
@@ -129,7 +131,6 @@ async function startApp() {
 startApp();
 // MongoDB connection and service startup
 // ── Request timeout ───────────────────────────────────────────────────────────
-// If a response has not been sent within REQUEST_TIMEOUT_MS, reply 503.
 app.use((req, res, next) => {
   res.setTimeout(config.REQUEST_TIMEOUT_MS, () => {
     const err = new Error(`Request timed out after ${config.REQUEST_TIMEOUT_MS}ms`);
@@ -139,6 +140,8 @@ app.use((req, res, next) => {
   next();
 });
 
+// ── Routes ────────────────────────────────────────────────────────────────────
+app.use('/api/schools',   schoolRoutes);
 mongoose.connect(config.MONGO_URI)
   .then(async () => {
     logger.info('MongoDB connected');
@@ -188,6 +191,8 @@ app.get('/health', async (req, res) => {
   }
 });
 
+// ── Global error handler ──────────────────────────────────────────────────────
+app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 // 404 handler for undefined routes
 app.use(notFoundHandler);
 
@@ -195,26 +200,44 @@ app.use(notFoundHandler);
 app.use(globalErrorHandler);
 app.use((err, req, res, next) => {
   const statusMap = {
-    TX_FAILED:              400,
-    MISSING_MEMO:           400,
-    INVALID_DESTINATION:    400,
-    UNSUPPORTED_ASSET:      400,
-    VALIDATION_ERROR:       400,
-    UNDERPAID:              400,
-    MISSING_SCHOOL_CONTEXT: 400,
-    MISSING_IDEMPOTENCY_KEY:400,
-    DUPLICATE_TX:           409,
-    DUPLICATE_SCHOOL:       409,
-    DUPLICATE_STUDENT:      409,
-    NOT_FOUND:              404,
-    SCHOOL_NOT_FOUND:       404,
-    STELLAR_NETWORK_ERROR:  502,
-    REQUEST_TIMEOUT:        503,
+    TX_FAILED:               400,
+    MISSING_MEMO:            400,
+    INVALID_DESTINATION:     400,
+    UNSUPPORTED_ASSET:       400,
+    VALIDATION_ERROR:        400,
+    UNDERPAID:               400,
+    MISSING_SCHOOL_CONTEXT:  400,
+    MISSING_IDEMPOTENCY_KEY: 400,
+    DUPLICATE_TX:            409,
+    DUPLICATE_SCHOOL:        409,
+    DUPLICATE_STUDENT:       409,
+    NOT_FOUND:               404,
+    SCHOOL_NOT_FOUND:        404,
+    STELLAR_NETWORK_ERROR:   502,
+    REQUEST_TIMEOUT:         503,
   };
   const status = statusMap[err.code] || err.status || 500;
-  logger.error('Request error', { code: err.code || 'INTERNAL_ERROR', message: err.message, requestId: req.requestId, status });
+  logger.error('Request error', { code: err.code || 'INTERNAL_ERROR', message: err.message, status });
   res.status(status).json({ error: err.message, code: err.code || 'INTERNAL_ERROR' });
 });
+
+// ── Database + service startup ────────────────────────────────────────────────
+mongoose.connect(config.MONGO_URI)
+  .then(async () => {
+    logger.info('MongoDB connected');
+    startPolling();
+    startConsistencyScheduler();
+    startRetryWorker();
+
+    try {
+      await initializeRetryQueue(app);
+      setupMonitoring(60000);
+      logger.info('All services initialized successfully');
+    } catch (error) {
+      logger.error('Failed to initialize retry queue system', { error: error.message });
+    }
+  })
+  .catch(err => logger.error('MongoDB error', { error: err.message }));
 
 async function startApp() {
   const dbConnected = await initializeDatabase();
@@ -224,7 +247,7 @@ async function startApp() {
 const PORT = config.PORT;
 const server = app.listen(PORT, () => logger.info(`Server running on port ${PORT}`));
 
-// ── Graceful shutdown ──────────────────────────────────────────────────────────
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
 async function shutdown(signal) {
   logger.info(`Received ${signal} — starting graceful shutdown`);
 

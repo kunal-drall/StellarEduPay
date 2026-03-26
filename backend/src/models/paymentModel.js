@@ -105,6 +105,10 @@ paymentSchema.index({ studentIdStr: 1, createdAt: -1 });
 // ====================== VIRTUALS ======================
 
 paymentSchema.virtual('explorerUrl').get(function() {
+  const hash = this.transactionHash || this.txHash;
+  if (!hash) return null;
+  const network = process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet';
+  return `https://stellar.expert/explorer/${network}/tx/${hash}`;
   if (!this.transactionHash) return null;
   return `https://stellar.expert/explorer/testnet/tx/${this.transactionHash}`;
 });

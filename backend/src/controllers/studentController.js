@@ -5,6 +5,7 @@ const FeeStructure = require('../models/feeStructureModel');
 const { get, set, del, KEYS, TTL } = require('../cache');
 const csv = require('csv-parser');
 const { Readable } = require('stream');
+const { get, set, del, KEYS, TTL } = require('../cache');
 
 async function registerStudent(req, res, next) {
   try {
@@ -141,6 +142,8 @@ async function getPaymentSummary(req, res, next) {
   }
 }
 
+// ── Helpers for bulk import ──────────────────────────────────────────────────
+
 function parseCsvBuffer(buffer) {
   return new Promise((resolve, reject) => {
     const rows = [];
@@ -155,7 +158,7 @@ function parseCsvBuffer(buffer) {
 
 const STUDENT_ID_RE = /^[A-Za-z0-9_-]{3,20}$/;
 
-function validateStudentRow(row, index) {
+function validateStudentRow(row) {
   const errors = [];
   if (!row.studentId || !STUDENT_ID_RE.test(row.studentId)) {
     errors.push('studentId must be 3–20 alphanumeric characters');
@@ -175,6 +178,7 @@ function validateStudentRow(row, index) {
   return errors;
 }
 
+// POST /api/students/bulk
 async function bulkImportStudents(req, res, next) {
   try {
     const { schoolId } = req;
@@ -199,7 +203,7 @@ async function bulkImportStudents(req, res, next) {
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
-      const validationErrors = validateStudentRow(row, i);
+      const validationErrors = validateStudentRow(row);
 
       if (validationErrors.length > 0) {
         results.failed++;

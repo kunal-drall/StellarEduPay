@@ -6,6 +6,7 @@
  */
 
 const crypto = require('crypto');
+const StellarSdk = require('@stellar/stellar-sdk');
 const Payment = require('../models/paymentModel');
 const PaymentIntent = require('../models/paymentIntentModel');
 const Student = require('../models/studentModel');
@@ -19,6 +20,7 @@ const {
   validatePaymentWithDynamicFee,     // ← New dynamic fee function
 } = require('../services/stellarService');
 const { queueForRetry } = require('../services/retryService');
+const { ACCEPTED_ASSETS, server } = require('../config/stellarConfig');
 const { SCHOOL_WALLET, ACCEPTED_ASSETS, server } = require('../config/stellarConfig');
 const StellarSdk = require('@stellar/stellar-sdk');
 const { validateTransactionHash } = require('../utils/hashValidator');
@@ -33,6 +35,9 @@ const {
   convertToLocalCurrency,
   enrichPaymentWithConversion,
 } = require('../services/currencyConversionService');
+
+// Permanent error codes that should NOT be retried
+const PERMANENT_FAIL_CODES = ['TX_FAILED', 'MISSING_MEMO', 'INVALID_DESTINATION', 'UNSUPPORTED_ASSET', 'AMOUNT_TOO_LOW', 'AMOUNT_TOO_HIGH', 'UNDERPAID'];
 
 const PERMANENT_FAIL_CODES = [
   'TX_FAILED', 'MISSING_MEMO', 'INVALID_DESTINATION', 
@@ -180,11 +185,13 @@ async function submitTransaction(req, res, next) {
     // (Amount should be extracted from operations, but verifyTransaction does that better)
     await paymentRecord.save();
 
+    const submitNetwork = process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet';
     res.json({
       verified: true,
       hash: normalizedHash,
       ledger: txResponse.ledger,
-      status: 'SUCCESS'
+      status: 'SUCCESS',
+      explorerUrl: `https://stellar.expert/explorer/${submitNetwork}/tx/${transactionHash}`,
     });
   } catch (err) {
     next(err);
@@ -316,6 +323,10 @@ async function verifyPayment(req, res, next) {
 
     const targetCurrency = req.school.localCurrency || 'USD';
     const conversion = await convertToLocalCurrency(result.amount, result.assetCode || 'XLM', targetCurrency);
+    const network = process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet';
+    const explorerUrl = result.hash
+      ? `https://stellar.expert/explorer/${network}/tx/${result.hash}`
+      : null;
 
     res.json({
       verified: true,
@@ -329,6 +340,7 @@ async function verifyPayment(req, res, next) {
       feeValidation: result.feeValidation,
       networkFee: result.networkFee,
       date: result.date,
+      explorerUrl,
       localCurrency: {
         amount:        conversion.available ? conversion.localAmount : null,
         currency:      conversion.currency,
@@ -397,15 +409,23 @@ async function finalizePayments(req, res, next) {
 
 async function getStudentPayments(req, res, next) {
   try {
-    const { studentId } = req.params;
     const targetCurrency = req.school.localCurrency || 'USD';
+    const network = process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet';
+
     const payments = await Payment
       .find({ schoolId: req.schoolId, studentId: req.params.studentId })
       .sort({ confirmedAt: -1 })
       .lean();
 
     const enriched = await Promise.all(
-      payments.map(p => enrichPaymentWithConversion(p, targetCurrency))
+      payments.map(async (p) => {
+        const hash = p.transactionHash || p.txHash;
+        const explorerUrl = hash
+          ? `https://stellar.expert/explorer/${network}/tx/${hash}`
+          : null;
+        const converted = await enrichPaymentWithConversion(p, targetCurrency);
+        return { ...converted, explorerUrl };
+      })
     );
     res.json(enriched);
   } catch (err) {
@@ -647,7 +667,17 @@ async function getAllPayments(req, res, next) {
       Payment.countDocuments(filter)
     ]);
 
+    const network = process.env.STELLAR_NETWORK === 'mainnet' ? 'public' : 'testnet';
+    const enrichedPayments = payments.map(p => {
+      const hash = p.transactionHash || p.txHash;
+      return {
+        ...p,
+        explorerUrl: hash ? `https://stellar.expert/explorer/${network}/tx/${hash}` : null,
+      };
+    });
+
     res.json({
+      payments: enrichedPayments,
       success: true,
       data: payments,
       pagination: {
