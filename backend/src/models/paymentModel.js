@@ -1,24 +1,21 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const softDelete = require('../utils/softDelete');
 
 const paymentSchema = new mongoose.Schema(
   {
     studentId:            { type: mongoose.Schema.Types.ObjectId, ref: 'Student', required: true },
     schoolId:             { type: String, required: true, index: true },
-
-    // String version of studentId used in memo matching
     studentIdStr:         { type: String, required: true, index: true },
 
     txHash:               { type: String, required: true, unique: true, index: true },
     amount:               { type: Number, required: true },
 
-    // ── Fee Fields ────────────────────────────────────────────────────────
-    feeAmount:            { type: Number, default: null },        // Original fee from intent/feeStructure
-    baseFee:              { type: Number, required: true },       // Base fee before adjustments
-    finalFee:             { type: Number, required: true },       // Final fee after dynamic adjustments (Issue #74)
+    feeAmount:            { type: Number, default: null },
+    baseFee:              { type: Number, required: true },
+    finalFee:             { type: Number, required: true },
 
-    // Dynamic Fee Adjustment Engine (Wave 3 - Issue #74)
     adjustmentsApplied: [{
       ruleName:           { type: String, required: true },
       type:               { type: String, enum: ['discount_percentage', 'discount_fixed', 'penalty_percentage', 'penalty_fixed', 'waiver'] },
@@ -40,16 +37,19 @@ const paymentSchema = new mongoose.Schema(
     ledgerSequence:       { type: Number, default: null },
     confirmationStatus:   { type: String, enum: ['pending_confirmation', 'confirmed'], default: 'pending_confirmation' },
 
-    // ── Audit trail ────────────────────────────────────────────────────────
+    // Audit trail
     transactionHash:      { type: String, default: null, index: true },
     startedAt:            { type: Date, default: null },
     submittedAt:          { type: Date, default: null },
     confirmedAt:          { type: Date, default: null, index: true },
     verifiedAt:           { type: Date, default: null },
 
-    // ── Payment locking ───────────────────────────────────────────────────
+    // Payment locking
     lockedUntil:          { type: Date, default: null },
     lockHolder:           { type: String, default: null },
+
+    // Soft Delete (Issue #77)
+    deletedAt:            { type: Date, default: null, index: true }
   },
   {
     timestamps: true,
@@ -57,6 +57,9 @@ const paymentSchema = new mongoose.Schema(
     toObject: { virtuals: true }
   }
 );
+
+// Apply soft delete utility
+softDelete(paymentSchema);
 
 // Indexes
 paymentSchema.index({ schoolId: 1, studentId: 1 });
@@ -67,13 +70,11 @@ paymentSchema.index({ schoolId: 1, confirmationStatus: 1 });
 paymentSchema.index({ studentIdStr: 1, createdAt: -1 });
 paymentSchema.index({ txHash: 1 });
 
-// Virtual for Stellar explorer
 paymentSchema.virtual('explorerUrl').get(function() {
   if (!this.transactionHash) return null;
   return `https://stellar.expert/explorer/testnet/tx/${this.transactionHash}`;
 });
 
-// Immutability protection
 paymentSchema.pre('save', async function(next) {
   if (!this.isNew && this.isModified()) {
     try {
