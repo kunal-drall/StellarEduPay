@@ -745,6 +745,40 @@ async function getStudentPayments(req, res, next) {
 
 // ... [Your other functions like verifyPayment, submitTransaction, syncAllPayments, etc. remain unchanged]
 
+const Receipt = require('../models/receiptModel');
+
+async function generateReceipt(req, res, next) {
+  try {
+    const { schoolId } = req;
+    const { txHash } = req.params;
+
+    // Return existing receipt if already generated
+    const existing = await Receipt.findOne({ txHash, schoolId });
+    if (existing) return res.json(existing);
+
+    const payment = await Payment.findOne({ txHash, schoolId, status: 'SUCCESS' });
+    if (!payment) {
+      return res.status(404).json({ error: 'Confirmed payment not found for this transaction hash', code: 'NOT_FOUND' });
+    }
+
+    const receipt = await Receipt.create({
+      txHash:              payment.txHash,
+      studentId:           payment.studentId,
+      schoolId:            payment.schoolId,
+      amount:              payment.amount,
+      assetCode:           payment.assetCode || 'XLM',
+      feeAmount:           payment.feeAmount,
+      feeValidationStatus: payment.feeValidationStatus,
+      memo:                payment.memo,
+      confirmedAt:         payment.confirmedAt,
+    });
+
+    res.status(201).json(receipt);
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getPaymentInstructions,
   createPaymentIntent,
@@ -767,4 +801,5 @@ module.exports = {
   retryDeadLetterJob,
   lockPaymentForUpdate,
   unlockPayment,
+  generateReceipt,
 };

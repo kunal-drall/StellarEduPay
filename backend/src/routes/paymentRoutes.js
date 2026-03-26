@@ -24,6 +24,7 @@ const {
   retryDeadLetterJob,
   lockPaymentForUpdate,
   unlockPayment,
+  generateReceipt,
 } = require('../controllers/paymentController');
 
 const {
@@ -54,6 +55,7 @@ router.get('/rates',                         getExchangeRates);
 router.get('/dlq',                           getDeadLetterJobs);
 router.get('/balance/:studentId',            validateStudentIdParam, getStudentBalance);
 router.get('/instructions/:studentId',       validateStudentIdParam, getPaymentInstructions);
+router.get('/receipt/:txHash',               generateReceipt);
 router.get('/:studentId',                    validateStudentIdParam, getStudentPayments);
 
 // ── POST routes ──────────────────────────────────────────────────────────────
